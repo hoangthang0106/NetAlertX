@@ -1,0 +1,270 @@
+# NetAlertX / IT-MANAGER - Portainer Git Stack (network + metrics).
+# IMPORTANT: host networking is required for ARP discovery on a Linux Docker host.
+# Host-networked services DO NOT use ports: N:N; the processes listen directly
+# on host ports 18897 (web) and 18900 (GraphQL/API).
+# The GraphQL API binds to 0.0.0.0:18900 in upstream NetAlertX:
+# BLOCK remote access to TCP 18900 with the Docker host firewall before
+# exposing the app to untrusted networks. Do not forward either port.
+# Run scripts/check-itmanager-ports.sh on the target Docker host before deployment;
+# verify 18897, 18899, 18900, 19090, 2375 are free on their bind addresses.
+# Social Analyzer fork reserves TCP 18898; do not reuse it for NetAlertX.
+services:
+  netalertx:
+    image: ghcr.io/netalertx/netalertx:latest
+    container_name: netalertx
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+
+    # Upstream-recommended minimal capabilities for network discovery and
+    # the service's non-root startup. Do not add privileged: true.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - NET_BIND_SERVICE
+      - CHOWN
+      - SETUID
+      - SETGID
+
+    environment:
+      # Host network: each listener uses the same TCP port on the Docker host.
+      # LISTEN_ADDR restricts the Nginx web UI to the specified local LAN IP.
+      # NOTE: This setting does NOT restrict the separately bound API listener.
+      LISTEN_ADDR: "${LAN_IP:?SET_DOCKER_HOST_LAN_IP}"
+      PORT: "18897"
+      GRAPHQL_PORT: "${NETALERTX_API_PORT:-18900}"
+      PUID: "20211"
+      PGID: "20211"
+      ALWAYS_FRESH_INSTALL: "false"
+      NETALERTX_DEBUG: "0"
+
+    volumes:
+      - netalertx_data:/data
+      - /etc/localtime:/etc/localtime:ro
+
+    # Match the supported official image startup layout. Keep /data persistent.
+    tmpfs:
+      - "/tmp:mode=1700,uid=0,gid=0,rw,noexec,nosuid,nodev,async,noatime,nodiratime"
+
+    mem_limit: 2048m
+    mem_reservation: 1024m
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+
+  # Docker discovery proxy for NetAlertX DOCKERDISC and Telegraf.
+  # SECURITY: POST=0 blocks writes, but CONTAINERS=1 still permits GET archive/export.
+  # Never expose 2375 to LAN or WAN; see IT-MANAGER-DEPLOY.md.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:lts
+    container_name: itmanager-docker-socket-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      INFO: "1"
+      NETWORKS: "1"
+      POST: "0"
+      BUILD: "0"
+      EXEC: "0"
+      IMAGES: "0"
+      VOLUMES: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      TASKS: "0"
+      SWARM: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:2375:2375"
+    networks: [telemetry]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+
+  # Config files generated into named volumes; no relative mounts, Portainer CE compatible.
+  monitoring-init:
+    image: alpine:3.21
+    restart: "no"
+    environment:
+      NETALERTX_API_TOKEN: "${NETALERTX_API_TOKEN:-}"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 022
+        mkdir -p /etc_prometheus /etc_telegraf /etc_grafana/datasources
+        cat > /etc_prometheus/prometheus.yml <<'PROM'
+        global:
+          scrape_interval: 60s
+          evaluation_interval: 60s
+        scrape_configs:
+          - job_name: proxmox
+            metrics_path: /pve
+            scrape_timeout: 45s
+            params:
+              module: ['default']
+              cluster: ['1']
+              node: ['1']
+            static_configs:
+              - targets: ['${PVE_HOST:?SET_PVE_HOST_IP_OR_DNS}']
+            relabel_configs:
+              - source_labels: [__address__]
+                target_label: __param_target
+              - source_labels: [__param_target]
+                target_label: instance
+              - target_label: __address__
+                replacement: 'itmanager-pve-exporter:9221'
+          - job_name: docker
+            metrics_path: /metrics
+            static_configs:
+              - targets: ['itmanager-telegraf:9273']
+          - job_name: prometheus
+            static_configs:
+              - targets: ['localhost:9090']
+        PROM
+        if [ -n "$NETALERTX_API_TOKEN" ]; then
+          printf '%s' "$NETALERTX_API_TOKEN" > /etc_prometheus/netalertx.token
+          chown 65534:65534 /etc_prometheus/netalertx.token
+          chmod 0400 /etc_prometheus/netalertx.token
+          cat >> /etc_prometheus/prometheus.yml <<'NETALERTX'
+          - job_name: netalertx
+            metrics_path: /metrics
+            static_configs:
+              - targets: ['${LAN_IP:?SET_DOCKER_HOST_LAN_IP}:${NETALERTX_API_PORT:-18900}']
+            authorization:
+              type: Bearer
+              credentials_file: /etc/prometheus/netalertx.token
+        NETALERTX
+        else
+          rm -f /etc_prometheus/netalertx.token
+        fi
+        cat > /etc_telegraf/telegraf.conf <<'TELEGRAF'
+        [agent]
+          interval = '30s'
+          flush_interval = '30s'
+          omit_hostname = false
+        [[inputs.docker]]
+          endpoint = 'tcp://docker-socket-proxy:2375'
+          timeout = '10s'
+          gather_services = false
+        [[outputs.prometheus_client]]
+          listen = ':9273'
+          path = '/metrics'
+        TELEGRAF
+        cat > /etc_grafana/datasources/prometheus.yml <<'GRAFANA'
+        apiVersion: 1
+        datasources:
+          - name: IT-MANAGER Prometheus
+            uid: itmanager-prometheus
+            type: prometheus
+            access: proxy
+            url: http://itmanager-prometheus:9090
+            isDefault: true
+            editable: false
+        GRAFANA
+    volumes:
+      - prometheus_config:/etc_prometheus
+      - telegraf_config:/etc_telegraf
+      - grafana_provisioning:/etc_grafana
+    networks: [telemetry]
+
+  itmanager-pve-exporter:
+    image: prompve/prometheus-pve-exporter:latest
+    container_name: itmanager-pve-exporter
+    restart: unless-stopped
+    environment:
+      PVE_USER: "${PVE_USER:?SET_PVE_READONLY_USER}"
+      PVE_TOKEN_NAME: "${PVE_TOKEN_NAME:?SET_PVE_TOKEN_NAME}"
+      PVE_TOKEN_VALUE: "${PVE_TOKEN_VALUE:?SET_PVE_TOKEN_VALUE}"
+      PVE_VERIFY_SSL: "${PVE_VERIFY_SSL:-true}"
+    expose: ["9221"]
+    networks: [telemetry]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+
+  itmanager-telegraf:
+    image: telegraf:1.36-alpine
+    container_name: itmanager-telegraf
+    restart: unless-stopped
+    depends_on:
+      docker-socket-proxy: {condition: service_started}
+      monitoring-init: {condition: service_completed_successfully}
+    volumes:
+      - telegraf_config:/etc/telegraf:ro
+    expose: ["9273"]
+    networks: [telemetry]
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+
+  itmanager-prometheus:
+    image: prom/prometheus:latest
+    container_name: itmanager-prometheus
+    restart: unless-stopped
+    depends_on:
+      monitoring-init: {condition: service_completed_successfully}
+      itmanager-pve-exporter: {condition: service_started}
+      itmanager-telegraf: {condition: service_started}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${METRICS_RETENTION:-730d}
+      - --storage.tsdb.retention.size=${METRICS_MAX_SIZE:-60GB}
+      - --web.listen-address=0.0.0.0:9090
+    volumes:
+      - prometheus_config:/etc/prometheus:ro
+      - prometheus_history:/prometheus
+    ports:
+      - "127.0.0.1:19090:9090"
+    networks: [telemetry]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+
+  itmanager-grafana:
+    image: grafana/grafana:latest
+    container_name: itmanager-grafana
+    restart: unless-stopped
+    depends_on:
+      monitoring-init: {condition: service_completed_successfully}
+      itmanager-prometheus: {condition: service_started}
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?SET_STRONG_GRAFANA_PASSWORD}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: "http://${LAN_IP:?SET_DOCKER_HOST_LAN_IP}:18899/"
+    ports:
+      - "${LAN_IP:?SET_DOCKER_HOST_LAN_IP}:18899:3000"
+    volumes:
+      - grafana_history:/var/lib/grafana
+      - grafana_provisioning:/etc/grafana/provisioning:ro
+    networks: [telemetry]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+
+networks:
+  telemetry:
+    internal: false
+
+volumes:
+  # Preserve this same compose-scoped volume, especially if NetAlertX was deployed before.
+  netalertx_data:
+  prometheus_config:
+    name: itmanager_prometheus_config
+  telegraf_config:
+    name: itmanager_telegraf_config
+  grafana_provisioning:
+    name: itmanager_grafana_provisioning
+  prometheus_history:
+    name: itmanager_prometheus_history
+  grafana_history:
+    name: itmanager_grafana_history
