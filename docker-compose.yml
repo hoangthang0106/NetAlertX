@@ -1,12 +1,13 @@
-# NetAlertX / IT-MANAGER - single-container Portainer Git Stack.
+# NetAlertX / IT-MANAGER - Portainer Git Stack (network + metrics).
 # IMPORTANT: host networking is required for ARP discovery on a Linux Docker host.
 # Host-networked services DO NOT use ports: N:N; the processes listen directly
 # on host ports 18897 (web) and 18900 (GraphQL/API).
 # The GraphQL API binds to 0.0.0.0:18900 in upstream NetAlertX:
-# BLOCK remote access to TCP 18898 with the Docker host firewall before
+# BLOCK remote access to TCP 18900 with the Docker host firewall before
 # exposing the app to untrusted networks. Do not forward either port.
 # Run scripts/check-itmanager-ports.sh on the target Docker host before deployment;
-# verify 18897, 18899, 18900, 19090, 2375 are free on their bind addresses. Social Analyzer fork reserves TCP 18898; do not reuse that port for NetAlertX.
+# verify 18897, 18899, 18900, 19090, 2375 are free on their bind addresses.
+# Social Analyzer fork reserves TCP 18898; do not reuse it for NetAlertX.
 services:
   netalertx:
     image: ghcr.io/netalertx/netalertx:latest
