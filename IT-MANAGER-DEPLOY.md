@@ -9,6 +9,30 @@
 
 **Giới hạn:** không sao lưu ảnh đĩa VM, nội dung VM/LXC, Docker application volumes, toàn bộ file hay raw logs, không lấy được dữ liệu từ trước ngày cài, không tự thu thập các Docker engine trên VM/host khác.
 
+## 0) Kiểm tra cổng TRƯỚC deploy (bắt buộc)
+
+Theo quy ước IT-MANAGER: phân biệt Host/VM/LXC + IP bind + TCP/UDP + HOST_PORT. Port trong GitHub là dự kiến; không chứng minh port đang rảnh.
+
+Cổng được quy hoạch hiện tại trên host cài NetAlertX:
+- **18897/TCP** NetAlertX Web: bind LAN_IP.
+- **18900/TCP** NetAlertX GraphQL: host network, có thể bind 0.0.0.0; BẮT BUỘC chặn firewall ngoài LAN/admin (không dùng 18898 do fork Social Analyzer cũng đã khai báo).
+- **18899/TCP** Grafana: bind LAN_IP.
+- **19090/TCP** Prometheus: loopback 127.0.0.1.
+- **2375/TCP** Docker Socket Proxy: loopback 127.0.0.1.
+- **18898/TCP** được giữ theo cấu hình cũ Social Analyzer, không dùng NetAlertX.
+
+Trên ĐÚNG máy Docker host/VM/LXC sẽ chạy Portainer Stack, chạy lệnh chỉ đọc:
+
+~~~bash
+git clone https://github.com/hoangthang0106/NetAlertX.git
+cd NetAlertX
+bash scripts/check-itmanager-ports.sh IP_THAT_CUA_DOCKER_HOST
+~~~
+
+Script kiểm tra socket TCP LISTEN, IP bind, các cổng mục tiêu và hiển thị docker ps (nếu có quyền). Không động chạm container. Nếu báo BUSY, **không deploy** cho tới khi kiểm tra ứng dụng chiếm cổng. Nếu báo FREE* chỉ chứng minh không có listener tương ứng tại THỜI ĐIỂM kiểm tra, không giữ chỗ; kiểm tra lại ngay trước Deploy. Nếu đã triển khai stack này rồi, chính các service của nó sẽ bị báo BUSY khi kiểm tra lại, đây không phải xung đột mới.
+
+IP mẫu ở tài liệu không phải IP đã kiểm chứng; 192.168.20.194 là IP từng có trong đường dẫn QRForge, không được mặc định là Docker host của mọi stack.
+
 ## 1) Token Proxmox chỉ đọc
 Trong shell Proxmox chạy:
 
@@ -44,7 +68,7 @@ Thêm biến môi trường trong phần Stack (các IP bên dưới là ví d�
 
 Bấm **Deploy the stack**.
 
-NetAlertX web: http://LAN_IP:18897; API: TCP 18898 (host network, cần firewall hạn chế truy cập); Grafana: http://LAN_IP:18899; Prometheus chỉ publish 127.0.0.1:19090; socket proxy chỉ publish 127.0.0.1:2375. Không mở cổng API/metrics/2375 ra Internet.
+NetAlertX web: http://LAN_IP:18897; API: TCP 18900 (host network, cần firewall hạn chế truy cập); Grafana: http://LAN_IP:18899; Prometheus chỉ publish 127.0.0.1:19090; socket proxy chỉ publish 127.0.0.1:2375. Không mở cổng API/metrics/2375 ra Internet.
 
 ## 3) Plugin Docker của NetAlertX
 Vào NetAlertX → Settings → Docker discovery (DOCKERDISC), thêm một Docker host:
