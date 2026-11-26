@@ -1,12 +1,12 @@
 # NetAlertX / IT-MANAGER - single-container Portainer Git Stack.
 # IMPORTANT: host networking is required for ARP discovery on a Linux Docker host.
 # Host-networked services DO NOT use ports: N:N; the processes listen directly
-# on host ports 18897 (web) and 18898 (GraphQL/API).
-# The GraphQL API binds to 0.0.0.0:18898 in upstream NetAlertX:
+# on host ports 18897 (web) and 18900 (GraphQL/API).
+# The GraphQL API binds to 0.0.0.0:18900 in upstream NetAlertX:
 # BLOCK remote access to TCP 18898 with the Docker host firewall before
 # exposing the app to untrusted networks. Do not forward either port.
-# Verify 18897 and 18898 are BOTH unused. Former Social Analyzer fork still
-# has 18898 in an undeployed Compose, and must not run simultaneously.
+# Run scripts/check-itmanager-ports.sh on the target Docker host before deployment;
+# verify 18897, 18899, 18900, 19090, 2375 are free on their bind addresses. Social Analyzer fork reserves TCP 18898; do not reuse that port for NetAlertX.
 services:
   netalertx:
     image: ghcr.io/netalertx/netalertx:latest
@@ -33,7 +33,7 @@ services:
       # NOTE: This setting does NOT restrict the separately bound API listener.
       LISTEN_ADDR: "${LAN_IP:?SET_DOCKER_HOST_LAN_IP}"
       PORT: "18897"
-      GRAPHQL_PORT: "18898"
+      GRAPHQL_PORT: "${NETALERTX_API_PORT:-18900}"
       PUID: "20211"
       PGID: "20211"
       ALWAYS_FRESH_INSTALL: "false"
@@ -134,7 +134,7 @@ services:
           - job_name: netalertx
             metrics_path: /metrics
             static_configs:
-              - targets: ['${LAN_IP:?SET_DOCKER_HOST_LAN_IP}:18898']
+              - targets: ['${LAN_IP:?SET_DOCKER_HOST_LAN_IP}:${NETALERTX_API_PORT:-18900}']
             authorization:
               type: Bearer
               credentials_file: /etc/prometheus/netalertx.token
