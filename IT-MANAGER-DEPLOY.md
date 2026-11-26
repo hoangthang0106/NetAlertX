@@ -1,114 +1,67 @@
-# IT-MANAGER: triển khai NetAlertX + Proxmox + Docker + lịch sử
+# IT-MANAGER — NetAlertX cài qua Portainer / Docker
 
-## Mục đích
-- NetAlertX: IP/MAC, trạng thái online/offline, nhật ký sự kiện thiết bị và Docker discovery.
-- Proxmox: Prometheus PVE exporter lấy CPU/RAM/disk/storage/VM/LXC và các metric API PVE cho phép.
-- Docker: Telegraf lấy metric theo container qua Docker Engine API.
-- Prometheus: lưu lịch sử mặc định **730 ngày hoặc 60GB, giới hạn nào tới trước**.
-- Grafana: tra cứu biểu đồ theo khung thời gian. Các volume Docker giữ dữ liệu khi restart/redeploy.
+## 1. Quy ước cổng (theo yêu cầu)
 
-**Giới hạn:** không sao lưu ảnh đĩa VM, nội dung VM/LXC, Docker application volumes, toàn bộ file hay raw logs, không lấy được dữ liệu từ trước ngày cài, không tự thu thập các Docker engine trên VM/host khác.
+- **Chỉ một cổng host cho NetAlertX: `18894:18894/tcp`**. Số cổng ngoài và trong container giống nhau.
+- Truy cập sau khi deploy: **http://192.168.20.194:18894/** (nếu đây là IP của Docker host cài Stack).
+- `18897` là cổng đã được báo trống nhưng **không dùng** cho NetAlertX lần này.
+- Quy ước mặc định cho phần mềm tương lai: `PORT:PORT`, chọn một cổng chưa dùng trên cùng Docker host; không tự thêm cổng web thứ hai.
+- API NetAlertX ở `20212` **chỉ chạy nội bộ trong container**, không được publish ra Docker host; giao diện web truy cập qua `/server` cùng cổng 18894.
+- Socket proxy Docker (nếu sử dụng) chỉ `expose: 2375` trên mạng container, **không publish host port 2375**.
 
-## 0) Kiểm tra cổng TRƯỚC deploy (bắt buộc)
+## 2. Triển khai Portainer Git Stack
 
-Theo quy ước IT-MANAGER: phân biệt Host/VM/LXC + IP bind + TCP/UDP + HOST_PORT. Port trong GitHub là dự kiến; không chứng minh port đang rảnh.
-
-Cổng được quy hoạch hiện tại trên host cài NetAlertX:
-- **18897/TCP** NetAlertX Web: bind LAN_IP.
-- **18900/TCP** NetAlertX GraphQL: host network, có thể bind 0.0.0.0; BẮT BUỘC chặn firewall ngoài LAN/admin (không dùng 18898 do fork Social Analyzer cũng đã khai báo).
-- **18899/TCP** Grafana: bind LAN_IP.
-- **19090/TCP** Prometheus: loopback 127.0.0.1.
-- **2375/TCP** Docker Socket Proxy: loopback 127.0.0.1.
-- **18898/TCP** được giữ theo cấu hình cũ Social Analyzer, không dùng NetAlertX.
-
-Trên ĐÚNG máy Docker host/VM/LXC sẽ chạy Portainer Stack, chạy lệnh chỉ đọc:
-
-~~~bash
-git clone https://github.com/hoangthang0106/NetAlertX.git
-cd NetAlertX
-bash scripts/check-itmanager-ports.sh IP_THAT_CUA_DOCKER_HOST
-~~~
-
-Script kiểm tra socket TCP LISTEN, IP bind, các cổng mục tiêu và hiển thị docker ps (nếu có quyền). Không động chạm container. Nếu báo BUSY, **không deploy** cho tới khi kiểm tra ứng dụng chiếm cổng. Nếu báo FREE* chỉ chứng minh không có listener tương ứng tại THỜI ĐIỂM kiểm tra, không giữ chỗ; kiểm tra lại ngay trước Deploy. Nếu đã triển khai stack này rồi, chính các service của nó sẽ bị báo BUSY khi kiểm tra lại, đây không phải xung đột mới.
-
-IP mẫu ở tài liệu không phải IP đã kiểm chứng; 192.168.20.194 là IP từng có trong đường dẫn QRForge, không được mặc định là Docker host của mọi stack.
-
-## 1) Token Proxmox chỉ đọc
-Trong shell Proxmox chạy:
-
-~~~bash
-pveum user add historian@pve --comment "IT-MANAGER metrics reader"
-pveum aclmod / -user historian@pve -role PVEAuditor
-pveum user token add historian@pve netalertx --privsep 0
-~~~
-
-Chép **giá trị token secret** vừa tạo vào nơi lưu bí mật; không commit lên GitHub. PVE_USER là historian@pve; PVE_TOKEN_NAME là netalertx. Máy Docker phải truy cập HTTPS TCP/8006 của Proxmox.
-
-## 2) Cài bằng Portainer Git Stack (Docker Standalone trên Linux)
 Portainer → Stacks → Add Stack → Repository:
-- Repository: https://github.com/hoangthang0106/NetAlertX
-- Reference: refs/heads/main
-- Compose path: docker-compose.yml
 
-Thêm biến môi trường trong phần Stack (các IP bên dưới là ví dụ, **không phải IP đã xác minh**):
+- Repository URL: `https://github.com/hoangthang0106/NetAlertX`
+- Reference: `refs/heads/main`
+- Compose path: `docker-compose.yml`
+- Giữ tên stack cũ nếu đã triển khai và cần giữ nguyên named volume `/data`.
+- Không cần nhập các biến Proxmox/Grafana vào Stack mặc định này.
 
-| Biến môi trường | Ý nghĩa |
-|---|---|
-| LAN_IP | IP trên **chính Docker host** chạy stack, thí dụ 192.168.20.194 |
-| PVE_HOST | IP/DNS node Proxmox; không thêm https:// hay :8006 |
-| PVE_USER | historian@pve |
-| PVE_TOKEN_NAME | netalertx |
-| PVE_TOKEN_VALUE | Secret của Proxmox API token |
-| PVE_VERIFY_SSL | true; chỉ đặt false với PVE self-signed nếu chấp nhận rủi ro |
-| GRAFANA_ADMIN_USER | admin hoặc tên khác |
-| GRAFANA_ADMIN_PASSWORD | Mật khẩu mạnh, dùng khi khởi tạo Grafana lần đầu |
-| NETALERTX_API_TOKEN | Tùy chọn; để trống lúc cài đầu, sau đó cập nhật để lấy NetAlertX /metrics |
-| METRICS_RETENTION | 730d (tùy chọn) |
-| METRICS_MAX_SIZE | 60GB (tùy chọn) |
+Trong `docker-compose.yml` đã chỉnh:
 
-Bấm **Deploy the stack**.
+```yaml
+services:
+  netalertx:
+    ports:
+      - "18894:18894/tcp"
+    environment:
+      LISTEN_ADDR: "0.0.0.0"
+      PORT: "18894"
+      GRAPHQL_PORT: "20212"
+```
 
-NetAlertX web: http://LAN_IP:18897; API: TCP 18900 (host network, cần firewall hạn chế truy cập); Grafana: http://LAN_IP:18899; Prometheus chỉ publish 127.0.0.1:19090; socket proxy chỉ publish 127.0.0.1:2375. Không mở cổng API/metrics/2375 ra Internet.
+NetAlertX dùng bridge networking để Docker publish `18894:18894`; **ARP/NBNS/mDNS quét LAN có thể thiếu dữ liệu**, vì upstream khuyến nghị host networking cho L2. Khi cần quét đầy đủ L2 phải xem lại kiến trúc quét/collector, không thể khẳng định bridge tương đương host.
 
-## 3) Plugin Docker của NetAlertX
-Vào NetAlertX → Settings → Docker discovery (DOCKERDISC), thêm một Docker host:
-- Docker Socket Proxy URL: http://127.0.0.1:2375
-- Docker Host MAC: MAC của Docker host nếu plugin không tự nhận diện bằng hostname.
-- Host cần tồn tại như một device NetAlertX. Containers hiện tại sẽ nằm trong Device Details → Plugins → DOCKERDISC.
+## 3. Kiểm tra cổng thật trên host
 
-**Cảnh báo quan trọng:** dù POST=0, Tecnativa docker-socket-proxy với CONTAINERS=1 có thể cho phép GET đọc archive/export và file container. Chỉ dùng trên host tin cậy, **không mở 2375 ra LAN/WAN**, không cho container khác truy cập mạng proxy. Tham khảo https://github.com/Tecnativa/docker-socket-proxy/issues/182 . Với môi trường yêu cầu bảo mật cao, thay bằng proxy lọc whitelist endpoint nghiêm ngặt.
+Chạy trên **chính** VM/LXC/Docker host sẽ deploy:
 
-## 4) Truy xuất lịch sử
-Grafana đã tự provision datasource **IT-MANAGER Prometheus**. Chọn Explore và thử PromQL:
+```bash
+ss -lntp | grep ':18894 ' || true
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+# hoặc từ repo:
+bash scripts/check-itmanager-ports.sh
+```
 
-~~~promql
-up
-up{job="proxmox"}
-pve_up
-pve_memory_usage_bytes
-pve_disk_usage_bytes
-up{job="docker"}
-netalertx_connected_devices
-~~~
+Nếu đã có listener ở TCP/18894 thì **không deploy đè**; script chỉ kiểm tra và không thay đổi service. Mày đã báo 18894 và 18897 trống, nhưng đó không phải phép đo runtime từ phía tao.
 
-Job netalertx chỉ xuất hiện khi NETALERTX_API_TOKEN được cung cấp; sau khi sửa biến môi trường cần redeploy để monitoring-init chạy lại. Job proxmox chỉ trỏ **1 PVE_HOST mặc định**; nếu có cluster nhiều node phải mở rộng target và chạy exporter cho mỗi node cần node-level metrics. Docker chỉ thu thập **engine nơi stack được cài**, không tự lấy mọi Docker host do Portainer quản lý.
+## 4. Dữ liệu và Docker discovery
 
-Lệnh kiểm tra trên Docker host:
-~~~bash
-docker ps --format 'table {{.Names}}\t{{.Status}}'
-docker logs itmanager-pve-exporter --tail 100
-docker logs itmanager-telegraf --tail 100
-docker logs itmanager-prometheus --tail 100
-~~~
+- NetAlertX dùng named volume `netalertx_data:/data` để giữ cấu hình, thiết bị, lịch sử sự kiện khi recreate; đừng chạy `docker compose down -v` và đừng xóa volume.
+- Docker Socket Proxy (service `docker-socket-proxy`) có thể được NetAlertX DOCKERDISC gọi nội bộ qua `http://docker-socket-proxy:2375`, không cần thêm host port.
+- Bật DOCKERDISC trong Settings và liên kết Docker host với device phù hợp; NetAlertX không tự sao lưu toàn bộ Docker volumes hoặc VM Proxmox.
+- Proxy Docker cung cấp quyền đọc container Docker nhạy cảm, dù `POST=0`; chỉ dùng trên host tin cậy.
+- Muốn lưu CPU/RAM/VM/LXC Proxmox dài hạn cần exporter/Prometheus (đã lưu riêng tại `compose-monitoring-optional.yml`); **không mặc định bật** vì yêu cầu lần này chỉ một host port.
 
-Container monitoring-init ở trạng thái exited (0) là bình thường. Đừng dùng docker compose down -v, xóa volumes hay tạo Portainer Stack mới với tên khác khi đã có dữ liệu. Volume NetAlertX giữ tên theo project Compose gốc; các volume Prometheus và Grafana dùng tên cố định.
+## 5. Kiểm tra và sao lưu
 
-## 5) Backup
-Trên **Docker host** chạy:
-~~~bash
-git clone https://github.com/hoangthang0106/NetAlertX.git
-cd NetAlertX
+```bash
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+docker logs netalertx --tail 100
+curl -I http://192.168.20.194:18894/
 sudo bash scripts/backup-itmanager.sh /opt/it-manager/backups
-~~~
+```
 
-Script tạm dừng NetAlertX, Prometheus và Grafana để tạo archive nhất quán, sau đó khởi động lại các container trước đó đang chạy. Backup Prometheus có thể rất lớn và sẽ gây gián đoạn trong lúc sao lưu. Chuyển backup sang ổ/NAS **khác máy**, thử khôi phục định kỳ. Lưu bí mật Portainer stack environment riêng. Không nhầm backup metric với backup toàn bộ VM/LXC/container.
+Đường dẫn mặc định sau deploy: http://192.168.20.194:18894. Không công bố cổng GraphQL hoặc Docker socket ra Internet.
