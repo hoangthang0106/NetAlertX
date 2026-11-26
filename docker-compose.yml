@@ -1,10 +1,8 @@
-# IT-MANAGER | NetAlertX | Portainer Git Stack | 192.168.20.194
-# Exactly ONE published host TCP port: 192.168.20.194:18897 -> container:20211.
-# TCP/18894 stays FREE (not used by this stack).
-# Backend API 20212 is internal; the UI uses the same-origin /server reverse proxy.
-# Docker BRIDGE is mandatory for ports: host:container mapping, but limits raw
-# LAN ARP/NBNS/mDNS discovery. See IT-MANAGER-DEPLOY.md before relying on scans.
-# Existing NetAlertX /data volume is preserved by keeping service/volume names.
+# IT-MANAGER | NetAlertX | Portainer Git Stack | one host port only
+# IT-MANAGER convention: HOST_PORT:CONTAINER_PORT MUST BE IDENTICAL.
+# NetAlertX: 18894:18894/tcp. Port 18897 remains unassigned by this stack.
+# NetAlertX backend API uses internal TCP/20212 and web proxy /server; it is NOT published.
+# Bridge networking limits L2 ARP/mDNS discovery; see IT-MANAGER-DEPLOY.md.
 services:
   netalertx:
     image: ghcr.io/netalertx/netalertx:latest
@@ -12,7 +10,7 @@ services:
     restart: unless-stopped
     read_only: true
     ports:
-      - "192.168.20.194:18897:20211/tcp"
+      - "18894:18894/tcp"
     cap_drop:
       - ALL
     cap_add:
@@ -24,9 +22,9 @@ services:
       - SETGID
     environment:
       LISTEN_ADDR: "0.0.0.0"
-      PORT: "20211"
+      PORT: "18894"
       GRAPHQL_PORT: "20212"
-      APP_CONF_OVERRIDE: '{"BACKEND_API_URL":"/server"}'
+      APP_CONF_OVERRIDE: '{"BACKEND_API_URL":"/server","GRAPHQL_PORT":"20212"}'
       PUID: "20211"
       PGID: "20211"
       ALWAYS_FRESH_INSTALL: "false"
