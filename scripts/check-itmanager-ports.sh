@@ -27,7 +27,7 @@ check_tcp() {
   fi
   # If a specific bind IP was provided, allow sockets on OTHER specific IPs,
   # but treat 0.0.0.0, * and IPv6 wildcard as conflicts (conservative).
-  if [[ -n "$LAN_IP" ]]; then
+  if [[ -n "$LAN_IP" && "$bind" != any ]]; then
     matching="$(printf '%s\n' "$all" | awk -v port="$port" -v intended="$bind" '
       { a=$4; sub(":" port "$", "", a);
         if (a=="*" || a=="0.0.0.0" || a=="[::]" || a=="::" ||
