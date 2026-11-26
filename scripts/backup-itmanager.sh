@@ -1,41 +1,22 @@
 #!/usr/bin/env bash
-# IT-MANAGER volume snapshot; run on the Docker host with docker CLI.
+# IT-MANAGER: backup NetAlertX persistent /data named volume.
+# Temporarily stop and restart only netalertx (if running); other apps untouched.
 set -Eeuo pipefail
 BACKUP_DIR="${1:-/opt/it-manager/backups}"
+command -v docker >/dev/null || { echo 'docker CLI missing' >&2; exit 2; }
+docker inspect netalertx >/dev/null
+VOL="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' netalertx)"
+if [ -z "$VOL" ]; then echo 'No named volume mounted at /data; aborting' >&2; exit 2; fi
+docker volume inspect "$VOL" >/dev/null
 mkdir -p "$BACKUP_DIR"
 BACKUP_DIR="$(cd "$BACKUP_DIR" && pwd -P)"
-RUN_ID="$(date +%Y%m%d-%H%M%S)"
-command -v docker >/dev/null || { echo "docker CLI missing" >&2; exit 1; }
-get_volume() {
-  docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$2\"}}{{.Name}}{{end}}{{end}}" "$1"
+WAS_RUNNING="$(docker inspect --format '{{.State.Running}}' netalertx)"
+restart_if_needed() {
+  if [ "$WAS_RUNNING" = true ]; then docker start netalertx >/dev/null || echo 'Warning: could not restart netalertx' >&2; fi
 }
-NETALERTX_VOL="$(get_volume netalertx /data)"
-PROMETHEUS_VOL="$(get_volume itmanager-prometheus /prometheus)"
-GRAFANA_VOL="$(get_volume itmanager-grafana /var/lib/grafana)"
-for vol in "$NETALERTX_VOL" "$PROMETHEUS_VOL" "$GRAFANA_VOL"; do
-  [[ -n "$vol" ]] || { echo "Missing named volume" >&2; exit 1; }
-  docker volume inspect "$vol" >/dev/null
-done
-RUNNING=()
-resume() {
-  for name in "${RUNNING[@]}"; do
-    docker start "$name" >/dev/null || echo "Failed to restart $name" >&2
-  done
-}
-trap resume EXIT
-for name in netalertx itmanager-prometheus itmanager-grafana; do
-  if [[ "$(docker inspect -f '{{.State.Running}}' "$name")" == true ]]; then
-    docker stop "$name" >/dev/null
-    RUNNING+=("$name")
-  fi
-done
-save_volume() {
-  local vol="$1" label="$2"
-  echo "Backup $label: $vol"
-  docker run --rm -v "$vol:/source:ro" -v "$BACKUP_DIR:/backup" alpine:3.21 \
-    tar -czf "/backup/${RUN_ID}-${label}.tar.gz" -C /source .
-}
-save_volume "$NETALERTX_VOL" netalertx-data
-save_volume "$PROMETHEUS_VOL" prometheus-history
-save_volume "$GRAFANA_VOL" grafana-data
-echo "Backup complete: $BACKUP_DIR"
+trap restart_if_needed EXIT
+if [ "$WAS_RUNNING" = true ]; then docker stop netalertx >/dev/null; fi
+STAMP="$(date +%Y%m%d-%H%M%S)"
+docker run --rm -v "$VOL:/source:ro" -v "$BACKUP_DIR:/backup" alpine:3.21 \
+  tar -czf "/backup/${STAMP}-netalertx-data.tar.gz" -C /source .
+echo "Saved $BACKUP_DIR/${STAMP}-netalertx-data.tar.gz"
